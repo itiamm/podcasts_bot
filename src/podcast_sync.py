@@ -143,6 +143,29 @@ def yt_dlp_common_args() -> list[str]:
     return args
 
 
+def find_channel(key: str) -> Channel:
+    for channel in CHANNELS:
+        if channel.key == key:
+            return channel
+    valid = ", ".join(channel.key for channel in CHANNELS)
+    raise RuntimeError(f"Unknown channel: {key}. Valid channels: {valid}")
+
+
+def extract_video_id(url: str) -> str:
+    patterns = [
+        r"[?&]v=([0-9A-Za-z_-]{6,})",
+        r"youtu\.be/([0-9A-Za-z_-]{6,})",
+        r"/shorts/([0-9A-Za-z_-]{6,})",
+        r"/live/([0-9A-Za-z_-]{6,})",
+        r"/embed/([0-9A-Za-z_-]{6,})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return safe_filename(url, max_len=120)
+
+
 def connect_db() -> sqlite3.Connection:
     db_path = ROOT / env("PODCAST_DB_PATH", "data/podcasts.sqlite3")
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -662,6 +685,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Sync YouTube long videos to MP3 on Cloudflare R2.")
     parser.add_argument("--dry-run", action="store_true", help="List work without downloading, uploading, or notifying.")
     parser.add_argument("--cleanup-only", action="store_true", help="Only delete expired R2 audio objects.")
+    parser.add_argument("--url", action="append", help="Manually process a YouTube video URL, including member-only videos you can access.")
+    parser.add_argument("--channel", default="bafenban", help="Channel key for --url uploads. Defaults to bafenban.")
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env")
@@ -673,6 +698,19 @@ def main() -> None:
         return
 
     notify_pending_uploads(conn, dry_run=args.dry_run)
+
+    if args.url:
+        channel = find_channel(args.channel)
+        for url in args.url:
+            manual_video = Video(
+                channel=channel,
+                video_id=extract_video_id(url),
+                title=url,
+                youtube_url=url,
+            )
+            process_video(conn, manual_video, dry_run=args.dry_run)
+        cleanup_retention(conn, dry_run=args.dry_run)
+        return
 
     for channel in CHANNELS:
         print(f"[CHANNEL] {channel.name}")

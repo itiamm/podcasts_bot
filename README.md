@@ -59,6 +59,28 @@ scripts/run.sh --dry-run
 scripts/run.sh
 ```
 
+## 手动处理会员视频
+
+会员专享视频不能绕过权限下载；必须满足：
+
+- 你的 YouTube 账号已经加入对应频道会员
+- 本机 Chrome 已登录这个 YouTube 账号
+- `.env` 中启用了 `YTDLP_COOKIES_FROM_BROWSER=chrome`
+
+拿到会员视频 URL 后先 dry-run：
+
+```bash
+scripts/run.sh --dry-run --channel bafenban --url 'https://www.youtube.com/watch?v=VIDEO_ID'
+```
+
+确认能识别后正式处理：
+
+```bash
+scripts/run.sh --channel bafenban --url 'https://www.youtube.com/watch?v=VIDEO_ID'
+```
+
+脚本会下载音频、转成 128k MP3、上传 R2，并通过 Telegram 推送。
+
 ## 安装每天 08:00 定时任务
 
 ```bash
