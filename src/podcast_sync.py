@@ -223,6 +223,14 @@ def mark_bootstrapped(conn: sqlite3.Connection, channel: Channel) -> None:
     conn.commit()
 
 
+def latest_seen_published_at(conn: sqlite3.Connection, channel: Channel) -> datetime | None:
+    row = conn.execute(
+        "SELECT MAX(published_at) AS latest FROM videos WHERE channel_key = ?",
+        (channel.key,),
+    ).fetchone()
+    return parse_dt(row["latest"]) if row and row["latest"] else None
+
+
 def already_seen(conn: sqlite3.Connection, video_id: str) -> bool:
     row = conn.execute("SELECT status FROM videos WHERE video_id = ?", (video_id,)).fetchone()
     if row is None:
@@ -514,6 +522,13 @@ def notify_telegram(video: Video, public_url: str) -> None:
 def collect_candidates(conn: sqlite3.Connection, channel: Channel) -> Iterable[Video]:
     if is_bootstrapped(conn, channel):
         candidates = fetch_feed_videos(channel)
+        latest_published = latest_seen_published_at(conn, channel)
+        if latest_published:
+            candidates = [
+                video
+                for video in candidates
+                if not video.published_at or video.published_at > latest_published
+            ]
     else:
         candidates = fetch_bootstrap_videos(channel)
     return sorted(
