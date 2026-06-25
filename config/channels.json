@@ -1,0 +1,52 @@
+[
+  {
+    "key": "nana",
+    "name": "NaNa 说美股",
+    "homepage_url": "https://www.youtube.com/@NaNaShuoMeiGu",
+    "channel_id": "UCFhJ8ZFg9W4kLwFTBBNIjOw",
+    "bootstrap_days": 7,
+    "language": "zh",
+    "generate_chinese_audio": false,
+    "enabled": true
+  },
+  {
+    "key": "meitoujun",
+    "name": "美投君",
+    "homepage_url": "https://www.youtube.com/@MeiTouJun",
+    "channel_id": "UCBUH38E0ngqvmTqdchWunwQ",
+    "bootstrap_days": 7,
+    "language": "zh",
+    "generate_chinese_audio": false,
+    "enabled": true
+  },
+  {
+    "key": "plain_bagel",
+    "name": "The Plain Bagel",
+    "homepage_url": "https://www.youtube.com/@ThePlainBagel",
+    "channel_id": "UCFCEuCsyWP0YkP3CZ3Mr01Q",
+    "bootstrap_days": 7,
+    "language": "en",
+    "generate_chinese_audio": true,
+    "enabled": true
+  },
+  {
+    "key": "ben_felix",
+    "name": "Ben Felix",
+    "homepage_url": "https://www.youtube.com/@BenFelixCSI",
+    "channel_id": "UCDXTQ8nWmx_EhZ2v-kp7QxA",
+    "bootstrap_days": 7,
+    "language": "en",
+    "generate_chinese_audio": true,
+    "enabled": true
+  },
+  {
+    "key": "investopedia",
+    "name": "Investopedia",
+    "homepage_url": "https://www.youtube.com/@investopedia",
+    "channel_id": "UCvwFhI0mrIWDiZUabRapS5Q",
+    "bootstrap_days": 7,
+    "language": "en",
+    "generate_chinese_audio": true,
+    "enabled": true
+  }
+]
