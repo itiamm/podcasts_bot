@@ -780,6 +780,18 @@ def zhipu_api_base() -> str:
     return env("ZHIPU_API_BASE", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
 
 
+def nvidia_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {env('NVIDIA_API_KEY', required=True)}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+def nvidia_api_base() -> str:
+    return env("NVIDIA_API_BASE", "https://integrate.api.nvidia.com/v1").rstrip("/")
+
+
 def upload_asr_source(mp3_path: Path, video: Video) -> tuple[str, str]:
     key = f"_asr_source/{video.channel.key}/{video.video_id}.mp3"
     return upload_path_to_r2(mp3_path, key, "audio/mpeg")
@@ -1012,12 +1024,40 @@ def zhipu_chat_json(messages: list[dict], temperature: float = 0.3) -> dict:
     return parse_json_object(content)
 
 
+def nvidia_chat_json(messages: list[dict], temperature: float = 0.3) -> dict:
+    payload = {
+        "model": env("NVIDIA_MODEL", "minimaxai/minimax-m3"),
+        "messages": messages,
+        "max_tokens": int(env("NVIDIA_MAX_TOKENS", "8192")),
+        "temperature": temperature,
+        "top_p": float(env("NVIDIA_TOP_P", "0.95")),
+        "stream": False,
+        "response_format": {"type": "json_object"},
+    }
+    response = requests.post(
+        f"{nvidia_api_base()}/chat/completions",
+        headers=nvidia_headers(),
+        json=payload,
+        timeout=int(env("NVIDIA_TIMEOUT_SECONDS", "600")),
+    )
+    if not response.ok:
+        raise RuntimeError(f"NVIDIA chat failed ({response.status_code}): {truncate_text(response.text, 500)}")
+    data = response.json()
+    content = data["choices"][0]["message"]["content"]
+    try:
+        return parse_json_object(content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"NVIDIA chat returned invalid JSON: {truncate_text(content, 500)}") from exc
+
+
 def text_model_json(messages: list[dict], temperature: float = 0.3) -> dict:
     provider = env("TEXT_PROVIDER", "dashscope").lower()
     if provider == "zhipu":
         return zhipu_chat_json(messages, temperature=temperature)
     if provider == "dashscope":
         return dashscope_chat_json(messages, temperature=temperature)
+    if provider == "nvidia":
+        return nvidia_chat_json(messages, temperature=temperature)
     raise RuntimeError(f"Unsupported TEXT_PROVIDER: {provider}")
 
 

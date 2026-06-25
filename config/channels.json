@@ -20,6 +20,16 @@
     "enabled": true
   },
   {
+    "key": "oldpowerful",
+    "name": "老厉害",
+    "homepage_url": "https://www.youtube.com/@oldpowerful",
+    "channel_id": "UC8gZZWIWmBuCb_gzC8DUrvw",
+    "bootstrap_days": 7,
+    "language": "zh",
+    "generate_chinese_audio": false,
+    "enabled": true
+  },
+  {
     "key": "plain_bagel",
     "name": "The Plain Bagel",
     "homepage_url": "https://www.youtube.com/@ThePlainBagel",
