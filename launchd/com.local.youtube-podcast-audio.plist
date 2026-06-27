@@ -8,11 +8,11 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/bytedance/projects/podcasts/scripts/run.sh</string>
+    <string>__ROOT_DIR__/scripts/run.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/bytedance/projects/podcasts</string>
+  <string>__ROOT_DIR__</string>
 
   <key>StartCalendarInterval</key>
   <dict>
@@ -23,10 +23,10 @@
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/Users/bytedance/projects/podcasts/logs/launchd.out.log</string>
+  <string>__ROOT_DIR__/logs/launchd.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/bytedance/projects/podcasts/logs/launchd.err.log</string>
+  <string>__ROOT_DIR__/logs/launchd.err.log</string>
 
   <key>RunAtLoad</key>
   <false/>

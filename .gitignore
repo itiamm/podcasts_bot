@@ -7,3 +7,4 @@ downloads/
 logs/
 models/
 .DS_Store
+debug-*.md

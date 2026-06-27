@@ -82,8 +82,29 @@ def env(name: str, default: str | None = None, required: bool = False) -> str:
     return value or ""
 
 
+def progress_bar(current: int, total: int, width: int = 20) -> str:
+    if total <= 0:
+        return "[" + "-" * width + "]"
+    current = max(0, min(current, total))
+    filled = round(width * current / total)
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+def log_progress(scope: str, current: int, total: int, message: str) -> None:
+    percent = 100 if total <= 0 else round(100 * max(0, min(current, total)) / total)
+    print(f"[PROGRESS] {progress_bar(current, total)} {percent:3d}% {scope} - {message}", flush=True)
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def content_window_days() -> int:
+    return int(env("CONTENT_LOOKBACK_DAYS", "7"))
+
+
+def content_cutoff() -> datetime:
+    return utc_now() - timedelta(days=content_window_days())
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -508,7 +529,7 @@ def fetch_feed_videos(channel: Channel) -> list[Video]:
 
 
 def fetch_bootstrap_videos(channel: Channel) -> list[Video]:
-    cutoff = utc_now() - timedelta(days=channel.bootstrap_days)
+    cutoff = utc_now() - timedelta(days=min(channel.bootstrap_days, content_window_days()))
     if env("BOOTSTRAP_SOURCE", "rss").lower() == "rss":
         try:
             return [
@@ -792,6 +813,10 @@ def nvidia_api_base() -> str:
     return env("NVIDIA_API_BASE", "https://integrate.api.nvidia.com/v1").rstrip("/")
 
 
+def ollama_api_base() -> str:
+    return env("OLLAMA_API_BASE", "http://127.0.0.1:11434").rstrip("/")
+
+
 def upload_asr_source(mp3_path: Path, video: Video) -> tuple[str, str]:
     key = f"_asr_source/{video.channel.key}/{video.video_id}.mp3"
     return upload_path_to_r2(mp3_path, key, "audio/mpeg")
@@ -912,13 +937,14 @@ def whisper_bin() -> str:
 
 
 def transcribe_with_local_whisper(mp3_path: Path, video: Video) -> str:
-    model_path = env("WHISPER_MODEL_PATH", required=True)
+    configured_model_path = Path(env("WHISPER_MODEL_PATH", required=True))
+    model_path = configured_model_path if configured_model_path.is_absolute() else ROOT / configured_model_path
     output_prefix = mp3_path.with_suffix(".whisper")
     output_txt = Path(str(output_prefix) + ".txt")
     args = [
         whisper_bin(),
         "-m",
-        model_path,
+        str(model_path),
         "-f",
         str(mp3_path),
         "-l",
@@ -978,12 +1004,36 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
 def parse_json_object(text: str) -> dict:
     cleaned = text.strip()
     if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"^```(?:json|JSON)?\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
     match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
     if match:
         cleaned = match.group(0)
-    return json.loads(cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        # 本地小模型偶尔会在 JSON 字符串里输出未转义换行；strict=False 可兼容这类控制字符。
+        return json.loads(cleaned, strict=False)
+
+
+def extract_loose_json_fields(text: str) -> dict:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json|JSON)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    result: dict[str, object] = {}
+    summary_match = re.search(r'"summary"\s*:\s*"(?P<summary>.*?)(?:"\s*[,}]|\s*```|\s*$)', cleaned, flags=re.DOTALL)
+    if summary_match:
+        result["summary"] = re.sub(r"\s+", " ", summary_match.group("summary")).strip()
+    title_match = re.search(r'"title"\s*:\s*"(?P<title>.*?)"\s*,', cleaned, flags=re.DOTALL)
+    if title_match:
+        result["title"] = re.sub(r"\s+", " ", title_match.group("title")).strip()
+    script_match = re.search(r'"script"\s*:\s*"(?P<script>.*?)(?:"\s*}|\s*```|\s*$)', cleaned, flags=re.DOTALL)
+    if script_match:
+        result["script"] = script_match.group("script").strip()
+    if result:
+        return result
+    raise json.JSONDecodeError("Could not extract loose JSON fields", cleaned, 0)
 
 
 def dashscope_chat_json(messages: list[dict], temperature: float = 0.3) -> dict:
@@ -1050,8 +1100,74 @@ def nvidia_chat_json(messages: list[dict], temperature: float = 0.3) -> dict:
         raise RuntimeError(f"NVIDIA chat returned invalid JSON: {truncate_text(content, 500)}") from exc
 
 
+def ollama_chat_json(messages: list[dict], temperature: float = 0.3) -> dict:
+    model = env("OLLAMA_MODEL", "qwen3.5:4b")
+    options = {
+        "temperature": temperature,
+        "top_p": float(env("OLLAMA_TOP_P", "0.9")),
+        "num_ctx": int(env("OLLAMA_NUM_CTX", "8192")),
+        "num_predict": int(env("OLLAMA_NUM_PREDICT", "4096")),
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "options": options,
+        "keep_alive": env("OLLAMA_KEEP_ALIVE", "5m"),
+    }
+    response = requests.post(
+        f"{ollama_api_base()}/api/chat",
+        json=payload,
+        timeout=int(env("OLLAMA_TIMEOUT_SECONDS", "900")),
+    )
+    if not response.ok:
+        raise RuntimeError(f"Ollama chat failed ({response.status_code}): {truncate_text(response.text, 500)}")
+    data = response.json()
+    content = data.get("message", {}).get("content", "")
+    try:
+        return parse_json_object(content)
+    except json.JSONDecodeError as exc:
+        repair_payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "把下面内容修复为严格 JSON 对象，只输出 JSON，不要 Markdown。"
+                        "保留原有字段和值；如果只有 summary，就输出 {\"summary\":\"...\"}。\n\n"
+                        f"{content}"
+                    ),
+                }
+            ],
+            "stream": False,
+            "format": "json",
+            "think": False,
+            "options": options,
+            "keep_alive": env("OLLAMA_KEEP_ALIVE", "5m"),
+        }
+        repair_response = requests.post(
+            f"{ollama_api_base()}/api/chat",
+            json=repair_payload,
+            timeout=int(env("OLLAMA_TIMEOUT_SECONDS", "900")),
+        )
+        if repair_response.ok:
+            repaired_content = repair_response.json().get("message", {}).get("content", "")
+            try:
+                return parse_json_object(repaired_content)
+            except json.JSONDecodeError:
+                pass
+        try:
+            return extract_loose_json_fields(content)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"Ollama chat returned invalid JSON: {truncate_text(content, 500)}") from exc
+
+
 def text_model_json(messages: list[dict], temperature: float = 0.3) -> dict:
     provider = env("TEXT_PROVIDER", "dashscope").lower()
+    if provider == "ollama":
+        return ollama_chat_json(messages, temperature=temperature)
     if provider == "zhipu":
         return zhipu_chat_json(messages, temperature=temperature)
     if provider == "dashscope":
@@ -1073,26 +1189,54 @@ def summarize_transcript_chunk(video: Video, chunk: str, index: int, total: int)
                 "content": (
                     f"这是 {video.channel.name} 的视频《{video.title}》转写稿第 {index}/{total} 段。\n"
                     "请提取事实、观点、论据、数字和风险提示，输出 JSON："
-                    "{\"summary\":\"中文分段摘要\"}。\n\n"
+                    "{\"summary\":\"中文分段摘要\"}。"
+                    "不要使用 Markdown 代码块；summary 必须是单行字符串，不要包含换行。\n\n"
                     f"{chunk}"
                 ),
             },
-        ]
+        ],
+        temperature=0.1,
     )
     return str(result.get("summary") or "").strip()
+
+
+def generate_script_fallback(video: Video, source_text: str, target_minutes: str) -> str:
+    log_progress(video.video_id, 1, 1, "补生成中文播客正文")
+    result = text_model_json(
+        [
+            {
+                "role": "system",
+                "content": "你是中文财经播客撰稿人，只负责生成可直接朗读的正文。",
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"频道：{video.channel.name}\n原标题：{video.title}\n"
+                    f"目标长度：约 {target_minutes} 分钟中文音频。\n"
+                    "请基于材料写一段完整中文播客正文，口语自然，事实准确，不新增材料没有的信息。\n"
+                    "输出严格 JSON：{\"script\":\"完整中文播客稿正文\"}。不要使用 Markdown 代码块。\n\n"
+                    f"材料：\n{source_text}"
+                ),
+            },
+        ],
+        temperature=0.2,
+    )
+    return str(result.get("script") or "").strip()
 
 
 def build_chinese_podcast_content(video: Video, transcript_text: str) -> tuple[str, list[str], str]:
     max_chunk_chars = int(env("TRANSLATE_CHUNK_CHARS", "20000"))
     chunks = chunk_text(transcript_text, max_chunk_chars)
     if len(chunks) > 1:
-        source_text = "\n\n".join(
-            summarize_transcript_chunk(video, chunk, index, len(chunks))
-            for index, chunk in enumerate(chunks, start=1)
-        )
+        summaries = []
+        for index, chunk in enumerate(chunks, start=1):
+            log_progress(video.video_id, index, len(chunks), f"摘要分块 {index}/{len(chunks)}")
+            summaries.append(summarize_transcript_chunk(video, chunk, index, len(chunks)))
+        source_text = "\n\n".join(summaries)
     else:
         source_text = transcript_text
 
+    log_progress(video.video_id, 1, 1, "生成完整中文播客稿")
     target_minutes = env("CHINESE_PODCAST_TARGET_MINUTES", "8-12")
     result = text_model_json(
         [
@@ -1110,7 +1254,8 @@ def build_chinese_podcast_content(video: Video, transcript_text: str) -> tuple[s
                     f"目标长度：约 {target_minutes} 分钟中文音频。\n"
                     "风格：轻松播客感，口语自然，但不要夸张，不要新增原文没有的信息。\n"
                     "输出严格 JSON："
-                    "{\"title\":\"中文标题\",\"summary\":[\"要点1\",\"要点2\",\"要点3\"],\"script\":\"完整中文播客稿\"}。\n\n"
+                    "{\"title\":\"中文标题\",\"summary\":[\"要点1\",\"要点2\",\"要点3\"],\"script\":\"完整中文播客稿\"}。"
+                    "不要使用 Markdown 代码块；summary 数组元素必须是单行字符串。\n\n"
                     f"材料：\n{source_text}"
                 ),
             },
@@ -1125,7 +1270,9 @@ def build_chinese_podcast_content(video: Video, transcript_text: str) -> tuple[s
         summary = [str(item).strip() for item in summary_raw if str(item).strip()]
     script = str(result.get("script") or "").strip()
     if not script:
-        raise RuntimeError("DashScope translation returned empty podcast script")
+        script = generate_script_fallback(video, source_text, target_minutes)
+    if not script:
+        raise RuntimeError("text model returned empty podcast script")
     return title, summary[:5], script
 
 
@@ -1291,11 +1438,14 @@ def synthesize_chinese_audio(video: Video, title: str, summary: list[str], scrip
     output_path = download_dir / f"{video.video_id}-zh.mp3"
     try:
         segment_paths: list[Path] = []
-        for index, segment in enumerate(split_tts_segments(script), start=1):
+        segments = split_tts_segments(script)
+        for index, segment in enumerate(segments, start=1):
+            log_progress(video.video_id, index, len(segments), f"TTS 分段 {index}/{len(segments)}")
             suffix = "aiff" if env("TTS_PROVIDER", "dashscope").lower() == "macos_say" else env("DASHSCOPE_TTS_FORMAT", "wav")
             segment_path = work_dir / f"{index:03d}.{suffix}"
             synthesize_tts_segment(segment, segment_path)
             segment_paths.append(segment_path)
+        log_progress(video.video_id, len(segments), len(segments), "合并 TTS 分段")
         concat_audio_segments(segment_paths, output_path)
         return ChineseAudio(title=title, summary=summary, script=script, audio_path=output_path)
     finally:
@@ -1303,20 +1453,29 @@ def synthesize_chinese_audio(video: Video, title: str, summary: list[str], scrip
 
 
 def generate_chinese_audio(video: Video, source_mp3: Path) -> tuple[ChineseAudio, str]:
+    log_progress(video.video_id, 1, 3, "本地 Whisper 转写")
     transcript_text = transcribe_audio(source_mp3, video)
+    log_progress(video.video_id, 2, 3, "生成中文播客内容")
     title, summary, script = build_chinese_podcast_content(video, transcript_text)
+    log_progress(video.video_id, 3, 3, "合成中文音频")
     return synthesize_chinese_audio(video, title, summary, script), transcript_text
 
 
 def collect_candidates(conn: sqlite3.Connection, channel: Channel) -> Iterable[Video]:
+    cutoff = content_cutoff()
     if is_bootstrapped(conn, channel):
         latest_published = latest_seen_published_at(conn, channel)
         try:
             candidates = fetch_feed_videos(channel)
         except Exception as exc:
             print(f"[WARN] RSS listing failed for {channel.name}, falling back to yt-dlp: {exc}")
-            cutoff = latest_published or (utc_now() - timedelta(days=channel.bootstrap_days))
-            candidates = fetch_yt_dlp_videos(channel, cutoff=cutoff)
+            yt_dlp_cutoff = max(latest_published, cutoff) if latest_published else cutoff
+            candidates = fetch_yt_dlp_videos(channel, cutoff=yt_dlp_cutoff)
+        candidates = [
+            video
+            for video in candidates
+            if not video.published_at or video.published_at >= cutoff
+        ]
         if latest_published:
             candidates = [
                 video
@@ -1332,6 +1491,7 @@ def collect_candidates(conn: sqlite3.Connection, channel: Channel) -> Iterable[V
 
 
 def process_video(conn: sqlite3.Connection, video: Video, dry_run: bool = False) -> bool:
+    log_progress(video.video_id, 1, 8, f"检查状态：{video.channel.name} / {video.title}")
     existing = existing_video(conn, video.video_id)
     if existing and existing["public_url"] and not existing["notified_at"]:
         pending_video = Video(
@@ -1355,6 +1515,7 @@ def process_video(conn: sqlite3.Connection, video: Video, dry_run: bool = False)
             )
             mark_notified(conn, pending_video.video_id)
             mark_status_by_id(conn, pending_video.video_id, "uploaded")
+            log_progress(video.video_id, 8, 8, "补发通知完成")
             print(f"[OK] notified pending upload {pending_video.channel.name}: {pending_video.title}")
             return True
         except Exception as exc:
@@ -1363,9 +1524,11 @@ def process_video(conn: sqlite3.Connection, video: Video, dry_run: bool = False)
             return False
 
     if already_seen(conn, video.video_id):
+        log_progress(video.video_id, 8, 8, "已处理，跳过")
         return True
 
     try:
+        log_progress(video.video_id, 2, 8, "获取视频元数据")
         enriched = enrich_video(video)
     except RuntimeError as exc:
         message = str(exc)
@@ -1375,6 +1538,16 @@ def process_video(conn: sqlite3.Connection, video: Video, dry_run: bool = False)
             upsert_video(conn, video, "failed_metadata")
         print(f"[SKIP] metadata unavailable for {video.channel.name} {video.title}: {message}")
         return False
+
+    cutoff = content_cutoff()
+    if enriched.published_at and enriched.published_at < cutoff:
+        if not dry_run:
+            upsert_video(conn, enriched, "skipped_outside_window")
+        print(
+            f"[SKIP] {enriched.channel.name} {enriched.title} published_at={enriched.published_at.date()} "
+            f"outside last {content_window_days()} days"
+        )
+        return True
 
     max_seconds = int(env("MAX_VIDEO_SECONDS", "10800"))
     if enriched.duration and enriched.duration > max_seconds:
@@ -1400,10 +1573,13 @@ def process_video(conn: sqlite3.Connection, video: Video, dry_run: bool = False)
     mp3_path: Path | None = None
     chinese_audio_path: Path | None = None
     try:
+        log_progress(enriched.video_id, 3, 8, "下载音频")
         mp3_path = download_mp3(enriched)
         if enriched.channel.generate_chinese_audio:
+            log_progress(enriched.video_id, 4, 8, "生成中文音频")
             chinese_audio, transcript_text = generate_chinese_audio(enriched, mp3_path)
             chinese_audio_path = chinese_audio.audio_path
+            log_progress(enriched.video_id, 6, 8, "上传中文音频到 R2")
             audio_key, public_url = upload_to_r2(chinese_audio.audio_path, enriched, title=chinese_audio.title)
             mark_uploaded(
                 conn,
@@ -1422,13 +1598,16 @@ def process_video(conn: sqlite3.Connection, video: Video, dry_run: bool = False)
                 "audio_language": "zh",
             }
         else:
+            log_progress(enriched.video_id, 6, 8, "上传原始音频到 R2")
             audio_key, public_url = upload_to_r2(mp3_path, enriched)
             mark_uploaded(conn, enriched, audio_key, public_url, audio_language=enriched.channel.language)
             notify_kwargs = {"audio_language": enriched.channel.language}
 
         try:
+            log_progress(enriched.video_id, 7, 8, "发送 Telegram 通知")
             notify_telegram(enriched, public_url, **notify_kwargs)
             mark_notified(conn, enriched.video_id)
+            log_progress(enriched.video_id, 8, 8, "处理完成")
             print(f"[OK] {enriched.channel.name}: {enriched.title}")
         except Exception as exc:
             mark_status_by_id(conn, enriched.video_id, "notification_failed")
@@ -1562,7 +1741,8 @@ def main() -> None:
 
     if args.url:
         channel = find_channel(channels, args.channel)
-        for url in args.url:
+        for index, url in enumerate(args.url, start=1):
+            log_progress("manual urls", index, len(args.url), url)
             manual_video = Video(
                 channel=channel,
                 video_id=extract_video_id(url),
@@ -1573,10 +1753,15 @@ def main() -> None:
         cleanup_retention(conn, dry_run=args.dry_run)
         return
 
-    for channel in channels:
+    for channel_index, channel in enumerate(channels, start=1):
+        log_progress("channels", channel_index, len(channels), channel.name)
         print(f"[CHANNEL] {channel.name}")
         completed_without_auth_error = True
-        for video in collect_candidates(conn, channel):
+        candidates = list(collect_candidates(conn, channel))
+        if not candidates:
+            log_progress(channel.name, 0, 0, "没有待处理视频")
+        for video_index, video in enumerate(candidates, start=1):
+            log_progress(channel.name, video_index, len(candidates), video.title)
             process_video(conn, video, dry_run=args.dry_run)
         if not args.dry_run and completed_without_auth_error and not is_bootstrapped(conn, channel):
             mark_bootstrapped(conn, channel)
