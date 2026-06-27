@@ -5,7 +5,7 @@
 当前已验证的英文频道链路：
 
 ```text
-YouTube 音频 -> 本地 Whisper 转写 -> NVIDIA MiniMax-M3 改写中文播客稿 -> 阿里百炼 Sambert TTS -> R2 -> Telegram
+YouTube 音频 -> 本地 Whisper 转写 -> 本地 Ollama 改写中文播客稿 -> 阿里百炼 Sambert TTS（额度异常时 macOS 本地 TTS 兜底）-> R2 -> Telegram
 ```
 
 ## 当前规则
@@ -76,6 +76,7 @@ AI 链路：
 | `ASR_PROVIDER` | 转写 provider，支持 `local_whisper`、`dashscope` |
 | `TEXT_PROVIDER` | 文本改写 provider，支持 `ollama`、`nvidia`、`zhipu`、`dashscope` |
 | `TTS_PROVIDER` | 语音合成 provider，支持 `dashscope`、`macos_say` |
+| `TTS_FALLBACK_PROVIDER` | DashScope TTS 遇到额度、限流或鉴权错误时的兜底 provider，默认 `macos_say` |
 | `WHISPER_BIN` / `WHISPER_MODEL_PATH` | 本地 whisper.cpp 可执行文件和模型路径 |
 | `WHISPER_LANGUAGE` / `WHISPER_EXTRA_ARGS` | 本地 Whisper 语言和额外参数 |
 | `NVIDIA_API_KEY` / `NVIDIA_API_BASE` / `NVIDIA_MODEL` | NVIDIA MiniMax-M3 文本模型配置 |
@@ -192,6 +193,7 @@ scripts/run.sh --channel nana --url 'https://www.youtube.com/watch?v=VIDEO_ID'
 ASR_PROVIDER=local_whisper
 TEXT_PROVIDER=ollama
 TTS_PROVIDER=dashscope
+TTS_FALLBACK_PROVIDER=macos_say
 WHISPER_MODEL_PATH=/absolute/path/to/ggml-small.en.bin
 WHISPER_EXTRA_ARGS=-bs 1 -bo 1
 OLLAMA_API_BASE=http://127.0.0.1:11434
@@ -229,7 +231,9 @@ Sambert 通过 DashScope Python SDK 调用，不走通用 HTTP TTS 端点。`sam
 - `dashscope`：使用阿里百炼 TTS，推荐方案。当前配置默认走 `sambert-zhide-v1`。
 - `macos_say`：使用 macOS 本地语音作为兜底，不依赖云端 TTS。
 
-如果要临时切回 macOS 本地 TTS 兜底，可以改成：
+默认情况下，`TTS_PROVIDER=dashscope` 会优先使用阿里百炼；如果返回额度、限流或鉴权类错误，会自动按 `TTS_FALLBACK_PROVIDER=macos_say` 重新合成整条音频，避免半条云端音色、半条本地音色混在一起。
+
+如果要临时固定使用 macOS 本地 TTS，可以改成：
 
 ```env
 TTS_PROVIDER=macos_say

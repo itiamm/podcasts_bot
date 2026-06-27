@@ -1296,6 +1296,14 @@ def split_tts_segments(text: str) -> list[str]:
     return segments
 
 
+def tts_output_suffix(provider: str) -> str:
+    if provider == "macos_say":
+        return "aiff"
+    if provider == "dashscope":
+        return env("DASHSCOPE_TTS_FORMAT", "wav")
+    raise RuntimeError(f"Unsupported TTS_PROVIDER: {provider}")
+
+
 def synthesize_sambert_segment(text: str, output_path: Path) -> None:
     import dashscope
     from dashscope.audio.tts import SpeechSynthesizer
@@ -1318,8 +1326,8 @@ def synthesize_sambert_segment(text: str, output_path: Path) -> None:
     output_path.write_bytes(audio_data)
 
 
-def synthesize_tts_segment(text: str, output_path: Path) -> None:
-    provider = env("TTS_PROVIDER", "dashscope").lower()
+def synthesize_tts_segment(text: str, output_path: Path, provider: str | None = None) -> None:
+    provider = (provider or env("TTS_PROVIDER", "dashscope")).lower()
     if provider == "macos_say":
         result = run_command(
             [
@@ -1402,6 +1410,50 @@ def synthesize_tts_segment(text: str, output_path: Path) -> None:
     output_path.write_bytes(audio_response.content)
 
 
+def is_dashscope_tts_fallback_error(exc: Exception) -> bool:
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        status_code = exc.response.status_code
+        if status_code in {401, 403, 429}:
+            return True
+        message = f"{exc} {exc.response.text}"
+    else:
+        message = str(exc)
+
+    markers = (
+        "allocationquota",
+        "freetieronly",
+        "quota",
+        "insufficient",
+        "no enough",
+        "balance",
+        "余额",
+        "额度",
+        "rate limit",
+        "too many requests",
+        "forbidden",
+        "unauthorized",
+        "invalid api-key",
+        "invalidapikey",
+    )
+    message = message.lower()
+    return any(marker in message for marker in markers)
+
+
+def synthesize_tts_segments(
+    video: Video,
+    segments: list[str],
+    work_dir: Path,
+    provider: str,
+) -> list[Path]:
+    segment_paths: list[Path] = []
+    for index, segment in enumerate(segments, start=1):
+        log_progress(video.video_id, index, len(segments), f"TTS 分段 {index}/{len(segments)} ({provider})")
+        segment_path = work_dir / f"{index:03d}.{tts_output_suffix(provider)}"
+        synthesize_tts_segment(segment, segment_path, provider)
+        segment_paths.append(segment_path)
+    return segment_paths
+
+
 def concat_audio_segments(segment_paths: list[Path], output_path: Path) -> None:
     concat_file = output_path.with_suffix(".concat.txt")
     lines = []
@@ -1437,14 +1489,28 @@ def synthesize_chinese_audio(video: Video, title: str, summary: list[str], scrip
     work_dir.mkdir(parents=True, exist_ok=True)
     output_path = download_dir / f"{video.video_id}-zh.mp3"
     try:
-        segment_paths: list[Path] = []
         segments = split_tts_segments(script)
-        for index, segment in enumerate(segments, start=1):
-            log_progress(video.video_id, index, len(segments), f"TTS 分段 {index}/{len(segments)}")
-            suffix = "aiff" if env("TTS_PROVIDER", "dashscope").lower() == "macos_say" else env("DASHSCOPE_TTS_FORMAT", "wav")
-            segment_path = work_dir / f"{index:03d}.{suffix}"
-            synthesize_tts_segment(segment, segment_path)
-            segment_paths.append(segment_path)
+        provider = env("TTS_PROVIDER", "dashscope").lower()
+        try:
+            segment_paths = synthesize_tts_segments(video, segments, work_dir, provider)
+        except Exception as exc:
+            fallback_provider = env("TTS_FALLBACK_PROVIDER", "macos_say").lower()
+            should_fallback = (
+                provider == "dashscope"
+                and fallback_provider
+                and fallback_provider != provider
+                and is_dashscope_tts_fallback_error(exc)
+            )
+            if not should_fallback:
+                raise
+            print(
+                "[WARN] DashScope TTS hit quota/auth/rate-limit error; "
+                f"fallback to {fallback_provider}: {truncate_text(str(exc), 300)}",
+                flush=True,
+            )
+            shutil.rmtree(work_dir, ignore_errors=True)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            segment_paths = synthesize_tts_segments(video, segments, work_dir, fallback_provider)
         log_progress(video.video_id, len(segments), len(segments), "合并 TTS 分段")
         concat_audio_segments(segment_paths, output_path)
         return ChineseAudio(title=title, summary=summary, script=script, audio_path=output_path)
